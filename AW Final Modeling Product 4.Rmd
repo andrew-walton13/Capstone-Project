@@ -1,0 +1,1081 @@
+---
+title: "Sampling Swire for Coke Heroes"
+author: "Jake, Ian, Andrew, Michael"
+date:  "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    css: custom-styles.css
+    theme: null
+    highlight: null
+    toc: true
+    toc_float: false
+---
+
+
+
+
+# Set up 
+
+```{r setup, include=FALSE}
+if (!require("pacman")) install.packages("pacman")
+
+# Use pacman to load (and install if necessary) the specific packages you requested
+pacman::p_load(dplyr, ggplot2, tidyverse, tidytext, skimr, readr, tidyr, lubridate, stringr, knitr, kableExtra, tidymodels, pROC, xgboost, doParallel, vip, DALEXtra)
+#have to manually load 'caret' for some reason
+
+```
+
+
+
+## Taking a sample of the whole dataset
+
+```{r}
+df <- readRDS("swire_no_nas.rds")  #inject the data and we will sub-sample
+
+```
+
+```{r}
+
+
+getwd()
+regions_joinme <- read.csv("states_summary.csv")
+
+unique(regions_joinme$REGION)
+# "NORTHERN"    "DESERT_SW"   "PRAIRIE"     "CALI_NEVADA"  "MOUNTAIN"    "SOCAL"   "ARIZONA"    "NEWMEXICO"   "NOCAL"    "COLORADO"    "KANSAS" 
+
+str(regions_joinme)
+# Perform a left join using the merge() function
+df <- merge(df, regions_joinme[, c("MARKET_KEY", "REGION")], by = "MARKET_KEY", all.x = TRUE)
+rm(regions_joinme)
+
+```
+
+
+
+### Quick imputations 
+
+
+```{r}
+# Update CALORIC_SEGMENT values: 0 if 'DIET/LIGHT', otherwise 1
+df$CALORIC_SEGMENT <- ifelse(df$CALORIC_SEGMENT == "DIET/LIGHT", 0, 1)
+df$MARKET_KEY <- as.character(df$MARKET_KEY)
+df <- df %>%
+  mutate(
+    MONTH = as.numeric(substr(DATE, 6, 7)),  # Extract the month from YYYY-MM-DD format
+    SEASON = case_when(
+      MONTH %in% c(12, 01, 02) ~ "WINTER",
+      MONTH %in% c(03, 04, 05) ~ "SPRING",
+      MONTH %in% c(06, 07, 08) ~ "SUMMER",
+      MONTH %in% c(09, 10, 11) ~ "FALL",
+      TRUE ~ NA_character_  # This is just in case there are any undefined values
+    )
+  )
+
+
+
+
+```
+
+
+```{r}
+str(df)
+```
+
+
+## Making a 10% sample of the data to shrink it 
+
+```{r}
+# Assuming df is your dataframe
+set.seed(123) # Set a random seed for reproducibility
+sampled_df <- df[sample(1:nrow(df), 2446143), ]
+rm(df)
+```
+
+```{r}
+df <- sampled_df
+rm(sampled_df)
+```
+
+```{r}
+#skim(df)
+```
+
+```{r}
+summary(df)
+```
+
+
+### Linear model on sampled data looks the same largely 
+
+```{r}
+# Perform a linear regression with UNIT_SALES as the dependent variable
+# and PRICE (or your chosen variable) as the independent variable
+linear_model <- lm(DOLLAR_SALES ~ UNIT_SALES, data = df)
+
+# Print the summary of the linear model to see the results
+summary(linear_model)
+
+```
+
+
+```{r fig.width=10, fig.height=10}
+# Create a scatter plot with the regression line, colored by MANUFACTURER
+ggplot(df, aes(x = UNIT_SALES, y = DOLLAR_SALES, color = MANUFACTURER)) +
+  geom_point(alpha = 0.5) +  # Adjust alpha to avoid overplotting, if necessary
+  geom_smooth(method = "lm", color = "black", se = FALSE) +  # Add linear regression line without confidence band for clarity
+  labs(title = "Linear Model of UNIT_SALES vs. DOLLAR_SALES by MANUFACTURER",
+       x = "UNIT SALES",
+       y = "DOLLAR SALES") +
+  theme_minimal() +
+  theme(legend.position = "bottom")  # Adjust legend position if needed
+
+```
+
+### Models by Total Dollar Sales
+
+#### Mulberries and Diet Square by Total Dollar Sales
+
+
+> There are only 737 existing observations of the Square brand. Probably not enough to make any strong decisions but we will do some exploration
+
+```{r fig.height=10, fig.width=10}
+
+# Filter the dataframe for only 'SQUARE'
+filtered_brand_df <- df %>% 
+  filter(BRAND == "SQUARE")
+```
+
+
+> This brand seems to only make Sparkling Water and the only Manufacturer is Swuire-CC
+
+```{r}
+
+filtered_brand_df <- filtered_brand_df %>%
+  mutate(
+    MONTH = month(ymd(DATE)),  # Extract month using lubridate's ymd function
+    MONTH = as.factor(MONTH)   # Convert the extracted month into a factor
+  )
+
+str(filtered_brand_df)
+print(unique(filtered_brand_df$CATEGORY))
+print(unique(filtered_brand_df$MANUFACTURER))
+
+```
+
+
+> This brand has very little exposure to the Northern Region as there are only 19 regions
+
+```{r}
+table(filtered_brand_df$REGION)
+
+
+```
+
+```{r}
+# Assuming 'innovation' is your data frame
+model_square <- lm(DOLLAR_SALES ~ UNIT_SALES + CALORIC_SEGMENT + PACKAGE + MONTH  + REGION, data = filtered_brand_df)
+summary(model_square)
+
+
+```
+```{r}
+print(unique(filtered_brand_df$PACKAGE))
+
+```
+
+```{r}
+
+table(filtered_brand_df$PACKAGE)
+```
+
+> The Northern Region actually doesn't seem to do too bad here compared to other models involving sparkling water and caloric segment, but there are only 19 observations in the northern region so I don't think we have a lot to go off here
+
+> September and October do really well here as the fall continues to be the best time of year months/season wise
+
+> From a packaging perspective, I was suprised to see so few options. It seems that historically the Square brand has been packaged using 20SMALL MULTI JUG over 90% of the time. 
+
+```{r}
+print(unique(filtered_brand_df$PACKAGE))
+
+```
+
+```{r}
+options(scipen = 999)
+table(filtered_brand_df$PACKAGE)
+```
+
+
+```{r}
+options(scipen = 999)
+
+```
+
+#### Made a New Smaller "innovation" Data Frame
+> To get a bigger data set that matched my innovation product, I decided to look at Sparkling Water. This left me with ~300,000 observations
+
+```{r}
+innovation <- df %>% 
+  filter(CATEGORY == "SPARKLING WATER")
+innovation$CATEGORY <- ifelse(innovation$CATEGORY == "SPARKLING WATER", 0, 1)
+print(unique(innovation$CATEGORY))
+
+
+innovation <- innovation %>%
+  mutate(
+    MONTH = month(ymd(DATE)),  # Extract month using lubridate's ymd function
+    MONTH = as.factor(MONTH)   # Convert the extracted month into a factor
+  )
+
+str(innovation)
+print(unique(innovation$CATEGORY))
+```
+
+> The sparkling water is (unsurprisingly) heavily skewed toward being diet or light. I don't know if we have enough observations of non-diet sparkling water to make any judgements on the impact that has on the dollar or unit sales
+
+```{r}
+table(innovation$CALORIC_SEGMENT)
+
+
+```
+
+#### Innovation Model by Total Dollar Sales
+
+```{r}
+# Assuming 'innovation' is your data frame
+model <- lm(DOLLAR_SALES ~ UNIT_SALES + CALORIC_SEGMENT + PACKAGE + MONTH + SEASON + REGION, data = innovation)
+summary(model)
+
+
+```
+
+>  Swire plans to release this product for the duration of 1 year but only in the Northern region. What will the forecasted demand be, in weeks, for this product?
+
+> Item Description: Diet Square Mulberries Sparkling Water 10Small MLT
+
+> Caloric Segment: Due to the unbalance of the data, I don't know how much we should look at this but there does seem to a be negative relationship on dollar sales when the caloric segment is not diet or light 
+
+> Brand: Square - We don't have any information on this brand at this time
+
+> Package Type: 10Small MLT
+
+> Region: Northern is one of the worst performing regions when it comes to Sparkling Water. This is very concerning as this is where they want to release this sparkling water product. New Mexico seems like it would be the best region to release a sparkling water product in.
+
+> Duration: The duration of one year is interesting. It seems that maybe with a smaller timeframe focused on the best months for sparkling water per our data above (either September-November or February-April) might be better.
+
+> Season: Fall seems to be the best month as changing the season to winter, spring, or summer has a negative impact on sales. Summer and winter have a particulary negative relationship with dollar sales wheras as spring has a negative relationship but it is right on the border of being significant.
+
+> Months: As expected based on the seasonal summary above, the fall months had the most positive relationship with dollar sales. Interestingly, the most positive relationship with dollar sales was March, which is likely the driver between Spring being the second best month (April was also a strong month).
+
+
+
+#### More Exploration of the Northern Region
+
+> Looking at a subset of the Northern Region only which is where they want to sell this product
+
+
+```{r}
+
+northern_region_df <- df %>%
+  filter(REGION == 'NORTHERN')
+
+skim(northern_region_df)
+```
+
+```{r fig.width=10, fig.height=10}
+# Create a scatter plot with the regression line, colored by MANUFACTURER
+ggplot(northern_region_df, aes(x = UNIT_SALES, y = DOLLAR_SALES, color = MANUFACTURER)) +
+  geom_point(alpha = 0.5) +  # Adjust alpha to avoid overplotting, if necessary
+  geom_smooth(method = "lm", color = "black", se = FALSE) +  # Add linear regression line without confidence band for clarity
+  labs(title = "Linear Model of UNIT_SALES vs. DOLLAR_SALES by MANUFACTURER in the NORTHERN REGION",
+       x = "UNTI SALES",
+       y = "DOLLAR SALES") +
+  theme_minimal() +
+  theme(legend.position = "bottom")  # Adjust legend position if needed
+
+```
+
+
+
+
+#### Make the Small Mulberries df
+> Now I am going to look at my mulberries subset from the original larger df
+
+```{r}
+mulberries_small <- df[grep("Mulberries", df$ITEM, ignore.case = TRUE), ]
+
+```
+
+```{r}
+skim(mulberries_small)
+```
+
+
+
+
+```{r}
+
+
+model_mulberries <- lm(DOLLAR_SALES ~ UNIT_SALES + CALORIC_SEGMENT + PACKAGE + CATEGORY + SEASON + REGION, data = mulberries_small)
+summary(model_mulberries)
+
+
+```
+> We have a few potential takeaways from this smaller dataframe focused on the mulberries flavor. We only have ~15,000 observations here but it is worth taking note of.
+
+> Region - similar to the larger model, it appears that the Northern Region is not a great place for this flavor in comparison to some of the other regions. It has a statisticly significant negative relationship in terms of total dollar sales. Unlike the larger Sparkling Water model, it isn't the worst region, but it still looks as if the Northern Region isn't big on Sparkling Water
+
+> Season - Spring and Fall again appear to be the best two seasons for sales, thought the difference is not as significant or as extreme for the flavor as it was for Sparkling Water
+
+> Packaging - The larger quantities of small packaging seem to have a significant negative relationship with total dollar sales (PACKAGE18SMALL MULTI JUG, PACKAGE20SMALL MULTI JUG, and PACKAGE24 - 25SMALL MULTI JUG) so going with an option like the one we are exploring 10Small MLT could be a good option.
+
+#### Cleaning
+
+> Cleaning up the item column
+
+```{r}
+
+mulberries_small <- mulberries_small %>%
+  mutate(
+    PACKAGE2 = str_extract(ITEM, "(CUP|JUG).*"),  # Extracts the part from CUP or JUG to the end.
+    ITEM = str_replace(ITEM, "(CUP|JUG).*", "")  # Replaces the CUP/JUG and everything after it with empty string in ITEM.
+  )
+
+
+
+```
+
+```{r}
+
+
+mulberries_small <- mulberries_small %>%
+  mutate(
+    TEMP = str_extract(ITEM, "\\d+\\.?\\d*.*"), # Extracts the part from the first number to the end.
+    PACKAGE2 = if_else(is.na(PACKAGE2), TEMP, paste(PACKAGE2, TEMP)), # Combines existing PACKAGE2 with new extraction if needed.
+    ITEM = str_replace(ITEM, "\\d+\\.?\\d*.*", ""), # Removes the numeric part and everything after it from ITEM.
+    TEMP = NULL  # Removes the temporary column.
+  )
+
+
+```
+
+```{r}
+na_rows <- mulberries_small %>%
+  filter(is.na(PACKAGE2))
+#na_rows
+#the above steps excised all packaging out of ITEM column
+```
+
+```{r}
+
+
+
+mulberries_small <- mulberries_small %>%
+  mutate(
+    GENTLE_DRINK = if_else(str_detect(ITEM, "GENTLE DRINK"), 1, 0), # Assigns 1 if "GENTLE DRINK" exists, otherwise 0.
+    ITEM = str_replace(ITEM, "GENTLE DRINK", "") # Removes "GENTLE DRINK" from ITEM.
+  )
+
+```
+
+```{r}
+
+mulberries_small <- mulberries_small %>%
+  mutate(
+    ENERGY_DRINK = if_else(str_detect(ITEM, "ENERGY DRINK"), 1, 0), # Assigns 1 if "ENERGY DRINK" exists, otherwise 0.
+    ITEM = str_replace(ITEM, "ENERGY DRINK", "") # Removes "ENERGY DRINK" from ITEM.
+  )
+
+
+```
+
+
+```{r}
+
+
+# Define the pattern as a regular expression
+pattern <- "ZERO CALORIES|ZERO CALORIE|ZERO SUGAR|SUGAR FREE|NO CALORIES"
+
+mulberries_small <- mulberries_small %>%
+  mutate(
+    CALORIC_SEGMENT_TEXT = str_extract(ITEM, pattern), # Extracts matching text based on the pattern.
+    ITEM = str_replace_all(ITEM, pattern, "") # Removes extracted text from ITEM.
+  )
+
+
+```
+
+
+```{r}
+
+
+mulberries_small <- mulberries_small %>%
+  mutate(
+    CALORIC_SEGMENT_TEXT = if_else(str_detect(ITEM, "\\bDIET\\b"), 
+                                   if_else(is.na(CALORIC_SEGMENT_TEXT), "DIET", paste(CALORIC_SEGMENT_TEXT, "DIET", sep=", ")), 
+                                   CALORIC_SEGMENT_TEXT)
+  )
+
+```
+
+```{r}
+
+
+# Function to remove the second instance of any repeating word
+remove_second_instance <- function(item) {
+  words <- unlist(str_split(item, "\\s+")) # Split item into words
+  unique_words <- unique(words) # Get unique words to check for repeats
+  for (word in unique_words) {
+    word_indices <- which(words == word) # Find all indices of the current word
+    if (length(word_indices) > 1) { # If there is more than one occurrence
+      words[word_indices[2]] <- "" # Remove the second occurrence
+    }
+  }
+  return(paste(words, collapse = " ")) # Reconstruct sentence without the second instance
+}
+
+# Apply the function to the 'ITEM' column
+mulberries_small <- mulberries_small %>%
+  mutate(ITEM = sapply(ITEM, remove_second_instance))
+
+
+# Remove specific columns
+mulberries_small <- select(mulberries_small, -PACKAGE2, -GENTLE_DRINK, -ENERGY_DRINK, -CALORIC_SEGMENT_TEXT)
+
+```
+
+```{r}
+head(mulberries_small)
+```
+
+> Mulberris Small is now cleaned up and ready for analysis
+
+
+#### Region and Category Subset by Total Dollar Sales
+> Looking at a subset of the Northern Region and Sparkling Water. This returns ~80,000 observations
+
+```{r}
+
+
+northern_sparkling_df <- df %>%
+  filter(REGION == 'NORTHERN') %>%
+  filter(CATEGORY == 'SPARKLING WATER')
+
+skim(northern_sparkling_df)
+```
+
+```{r}
+
+str(northern_sparkling_df)
+```
+
+```{r}
+
+model_north_sparkling <- lm(DOLLAR_SALES ~ UNIT_SALES + PACKAGE + SEASON , data = northern_sparkling_df)
+summary(model_north_sparkling)
+
+```
+
+#### Mulberries and Diet Square Final Thoughts
+
+> Some interesting takeaways here:
+
+> Season: When looking at sparkling water in the north region, the spring has a very negative and statistically significant relationship with dollar sales. This is different than the previous two models where Spring was one of the top two along with Fall
+
+> Packaging: Continues the trend of getting more negative and more statistically significant in the large values
+
+```{r include=FALSE}
+#save mulberries_small.csv
+# write.csv(mulberries_small, "mulberries_small.csv", row.names = FALSE)
+```
+
+```{r include=FALSE}
+#cleanup the df 
+# rm(list = setdiff(ls(), "df_orig"))
+```
+
+
+#### Product 4 Summary Total Dollar Sales
+
+
+> I do not think that we should recommend this product. We have very few observations of our Square Brand, and only 19 of those reside in the Northern Region. When widening the scope to look at other factors such as the flavor, category, and region as a whole, it continues to not make sense to sell this product for a whole year in the Northern Region.
+
+> The Northern Region consistantly demonstrated a negative relationship with total dollar sales in comparison with the other regions we reviewed. The Square brand has been primarily sold in California and the Southwest so far and we don't have sufficient data to say that this brand would do better than the other sparkling waters that have not done well in the Northern Region
+
+> From a time perspective, it also does not make sense to sell this for the whole year. The spring and especially the fall do far better than the winter in all of the regression models we ran. We wouldn't want to recommend selling it during months where it would not perform well
+
+> From a flavor and category perspective, we were able to gain more insights such as the best type of packaging associated with the flavor, but the northern region continued to perform poorly with the flavor mulberries
+
+> In summary, I would not recommend we move forward with this product due to the small amount of historical data that we have with the brand and flavor and the poor performance of the region.
+
+
+### Models by Unit Sales
+
+#### Sparkling Water Model by Unit Sales
+
+
+
+```{r}
+
+model_inn_us <- lm(UNIT_SALES ~ DOLLAR_SALES + CALORIC_SEGMENT + PACKAGE + MONTH + SEASON + REGION, data = innovation)
+summary(model_inn_us)
+
+```
+
+
+> Kansas is an extreme outlier here in terms of unit sales with an extremely high positive change in UNIT_SALES when selling in Kansas. 
+
+> The best months are in the summer for unit sales even though the fall was the clear leader for total dollar sales
+
+#### Mulberries by Unit Sales
+
+```{r}
+
+model_mulberries_us <- lm(UNIT_SALES ~ DOLLAR_SALES + CALORIC_SEGMENT + CATEGORY + PACKAGE + MONTH + SEASON + REGION, data = mulberries_small)
+summary(model_mulberries_us)
+
+```
+
+#### Square Brand Model by Unit Sales
+
+```{r}
+
+model_square_us <- lm(UNIT_SALES ~ DOLLAR_SALES + CALORIC_SEGMENT + PACKAGE  + MONTH + SEASON + REGION, data = filtered_brand_df)
+summary(model_square_us)
+
+```
+
+#### Sparkling Water in Northern Region Model by Unit Sales
+
+```{r}
+
+model_north_sparkling_us <- lm(UNIT_SALES ~ DOLLAR_SALES + PACKAGE + MONTH   + SEASON , data = northern_sparkling_df)
+summary(model_north_sparkling_us)
+
+```
+
+#### Product 4 Summary Total Dollar Sales
+
+> Kansas is an extreme outlier here in terms of unit sales with an extremely high positive change in UNIT_SALES when selling in Kansas. 
+
+> The best months are in the summer for unit sales even though the fall was the clear leader for total dollar sales
+
+> The packaging is also better for the larger numbers wheras with total dollar sales it was the other way around
+
+```{r}
+
+
+library(xgboost)
+library(caret)
+library(dplyr)
+
+```
+
+```{r}
+str(mulberries_small)
+
+
+```
+
+
+```{r}
+
+
+
+
+library(caret)
+
+# Assuming you have already loaded your data into mulberries_small dataframe
+
+# Remove the MARKET_KEY column
+mulberries_small <- mulberries_small[, !names(mulberries_small) %in% "MARKET_KEY"]
+
+# Identify categorical variables
+categorical_cols <- c("CATEGORY", "MANUFACTURER", "BRAND", "PACKAGE", "REGION", "SEASON")
+
+# One-hot encode categorical variables
+encoded_data <- dummyVars("~.", data = mulberries_small[categorical_cols], fullRank = TRUE)
+encoded_data <- predict(encoded_data, newdata = mulberries_small[categorical_cols])
+
+# Bind the encoded variables with the original dataframe
+mulberries_encoded <- cbind(mulberries_small, encoded_data)
+
+# Remove the original categorical variables
+mulberries_encoded <- mulberries_encoded[, !(names(mulberries_encoded) %in% categorical_cols)]
+
+# Now you can proceed with the modeling process
+
+
+```
+
+
+```{r}
+
+str(mulberries_encoded)
+```
+
+
+
+
+
+
+
+```{r}
+
+
+
+
+
+# List to store unique values for each variable
+unique_values_list <- list()
+
+# Columns to get unique values for
+columns_to_get_unique_values <- c("BRAND", "PACKAGE", "ITEM", "REGION", "SEASON")
+
+# Get unique values for each variable and store in the list
+for (col in columns_to_get_unique_values) {
+  unique_values_list[[col]] <- unique(mulberries_small[[col]])
+}
+
+# Loop over unique regions and create new columns
+for (region in unique_values_list$REGION) {
+  mulberries_small[[region]] <- as.integer(grepl(region, mulberries_small$REGION))
+}
+
+# Loop over unique brands and create new columns
+for (brand in unique_values_list$BRAND) {
+  mulberries_small[[brand]] <- as.integer(grepl(brand, mulberries_small$BRAND))
+}
+
+# Loop over unique brands and create new columns
+for (item in unique_values_list$ITEM) {
+  mulberries_small[[item]] <- as.integer(grepl(item, mulberries_small$ITEM))
+}
+
+# Loop over unique regions and create new columns
+for (package in unique_values_list$PACKAGE) {
+  mulberries_small[[package]] <- as.integer(grepl(package, mulberries_small$PACKAGE))
+}
+
+# Loop over unique regions and create new columns
+for (season in unique_values_list$SEASON) {
+  mulberries_small[[season]] <- as.integer(grepl(season, mulberries_small$SEASON))
+}
+
+mulberries_small <- mulberries_small[, !names(mulberries_small) == ""]
+# Remove unnecessary columns
+one_hot_mulberries <- mulberries_small %>%
+  select(-CALORIC_SEGMENT, -CATEGORY, -MANUFACTURER, -BRAND, -REGION, -PACKAGE, -ITEM)
+
+head(one_hot_mulberries)
+
+write.csv(one_hot_mulberries, "one_hot_mulberries.csv", row.names = FALSE)
+```
+
+
+
+```{r}
+
+```
+
+```{r}
+# Load and prepare dataset
+df1 <- read.csv("one_hot_mulberries.csv") 
+df1 <- df1 %>% 
+  select(-DATE, -MONTH, -WINTER, -SPRING, -FALL, -DOLLAR_SALES, -SUMMER)
+```
+
+
+```{r}
+# Summarize the dataset
+skimr::skim(df1)
+```
+
+
+
+```{r}
+#Remove outliers in top 1% of Unit Sales. 
+df1 <- df1 %>% filter(UNIT_SALES < quantile(UNIT_SALES, 0.99))
+
+df1 <- df1[, !(names(df) == "SEASON")]
+
+# Summarize the dataset
+skimr::skim(df1)
+
+```
+
+
+```{r}
+# Split the data
+set.seed(123)
+df_testtrn <- initial_split(df1, prop = 0.8, strata = UNIT_SALES)
+Train <- training(df_testtrn)
+Test <- testing(df_testtrn)
+
+# Prepare features and labels for XGBoost
+train_features <- Train[, -which(names(Train) == "UNIT_SALES")]
+train_labels <- Train$UNIT_SALES
+test_features <- Test[, -which(names(Test) == "UNIT_SALES")]
+test_labels <- Test$UNIT_SALES
+
+train_features <- lapply(train_features, as.numeric)
+train_labels <- as.numeric(train_labels)
+
+
+
+train_features <- lapply(train_features, as.numeric)
+
+# Convert the list to a matrix
+train_matrix <- do.call(cbind, train_features)
+
+# Create DMatrix
+train_dmatrix <- xgb.DMatrix(data = train_matrix, label = train_labels)
+
+
+
+test_features <- lapply(test_features, as.numeric)
+
+# Convert the list to a matrix
+test_matrix <- do.call(cbind, test_features)
+
+# Create DMatrix
+test_dmatrix <- xgb.DMatrix(data = test_matrix, label = test_labels)
+
+
+
+```
+
+
+```{r}
+
+# Define XGBoost parameters
+set.seed(123)
+
+
+
+params <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror",
+  eval_metric = "rmse",
+  eta = 0.05,
+  max_depth = 3,
+  min_child_weight = 1,
+  subsample = 0.7,
+  colsample_bytree = 0.6,
+  reg_lambda = 1,
+  reg_alpha = 0
+)
+
+
+```
+
+```{r}
+
+# Perform cross-validation to find the optimal number of boosting rounds
+cv_results <- xgb.cv(
+  params = params,
+  data = train_dmatrix,  
+  nfold = 5,
+  nrounds = 500,  # Changed from 'num_boost_round' to 'nrounds'
+  early_stopping_rounds = 10,
+  metrics = "rmse",
+  seed = 123
+)
+best_nrounds <- cv_results$best_iteration
+```
+
+
+```{r}
+# Train the final model using the best number of rounds found
+model_xgb <- xgb.train(
+  params = params,
+  data = train_dmatrix,
+  nrounds = best_nrounds
+)
+
+```
+
+```{r}
+
+# Make predictions and evaluate the model
+train_pred <- predict(model_xgb, train_dmatrix)
+test_pred <- predict(model_xgb, test_dmatrix)
+train_rmse <- sqrt(mean((train_labels - train_pred)^2))
+test_rmse <- sqrt(mean((test_labels - test_pred)^2))
+
+
+```
+
+```{r}
+
+# Calculate R-squared for the training set
+sst_train <- sum((train_labels - mean(train_labels)) ^ 2)
+ssr_train <- sum((train_labels - train_pred) ^ 2)
+r_squared_train <- 1 - (ssr_train / sst_train)
+
+# Calculate R-squared for the test set
+sst_test <- sum((test_labels - mean(test_labels)) ^ 2)
+ssr_test <- sum((test_labels - test_pred) ^ 2)
+r_squared_test <- 1 - (ssr_test / sst_test)
+
+train_mape <- mean(abs((train_labels - train_pred) / train_labels)) * 100
+test_mape <- mean(abs((test_labels - test_pred) / test_labels)) * 100
+train_mae <- mean(abs(train_labels - train_pred))
+test_mae <- mean(abs(test_labels - test_pred))
+
+
+
+```
+
+```{r}
+
+cat("Model Performance Metrics:\n",
+    "--------------------------\n",
+    "Training RMSE: ", train_rmse, "\n",
+    "Test RMSE: ", test_rmse, "\n",
+    "Training R-squared: ", r_squared_train, "\n",
+    "Test R-squared: ", r_squared_test, "\n",
+    "Training MAE: ", train_mae, "\n",
+    "Test MAE: ", test_mae, "\n",
+    "Training MAPE: ", train_mape, "%\n",
+    "Test MAPE: ", test_mape, "%\n", sep="")
+
+
+```
+
+```{r}
+
+
+```
+
+
+
+
+
+
+
+```{r}
+# Calculate feature importance
+importance_matrix2 <- xgb.importance(feature_names = colnames(train_features), model = model_xgb)
+
+# View the feature importance scores
+print(importance_matrix2)
+
+xgb.plot.importance(importance_matrix = importance_matrix2)
+```
+> From this Importance matrix we see that the two most important factors to the model are a flavor that is sparkling water and mulberries flavor and also the Northern Region. The BUBBLE.JOY.SPARKLING.WATER.MULBERRIES... has a very high gain, suggesting it's important for prediction. It covers a moderate proportion of the dataset and appears with moderate frequency. The Northern Region (while significantly less) still has the third highest gain and it covers a high proportion of the dataset and appears frequently. This would contribute to the case for using this as an innovation product - there is evidence that amongst the Mulberries flavor, the northern region and sparkling water have been successful in the past
+
+## Create Dummy Data and attempt prediction
+
+```{r}
+# Define vectors for each category
+regions <- 1:11
+brands <- 1:6
+items <- 1:7
+package_options <- 1:4
+
+# Create data frame with all combinations of categories
+combinations <- expand.grid(Region = regions, Brand = brands, Item = items, Package = package_options)
+
+# Duplicate each combination 52 times to represent each week of the year
+final_df_replicated <- combinations[rep(row.names(combinations), each = 52), ]
+
+# Add a column with values from 1 to 52 for each combination
+final_df_replicated$Week_of_Year <- rep(1:52, times = nrow(combinations))
+
+# Duplicate each combination 52 times to represent each week of the year
+final_df_replicated <- final_df_replicated[rep(row.names(final_df_replicated), each = 13), ]
+
+# Add a column with values from 1 to 13 for each combination
+final_df_replicated$Week_Since_Launch <- rep(1:13, times = nrow(combinations))
+
+final_df_replicated$Region <- unique_values_list$REGION[final_df_replicated$Region]
+final_df_replicated$Brand <- unique_values_list$BRAND[final_df_replicated$Brand]
+final_df_replicated$Item <- unique_values_list$ITEM[final_df_replicated$Item]
+final_df_replicated$Package <- unique_values_list$PACKAGE[final_df_replicated$Package]
+
+# List to store unique values for each variable
+new_unique_values_list <- list()
+
+# Columns to get unique values for
+new_columns_to_get_unique_values <- c("Region", "Brand", "Item", "Package")
+
+# Get unique values for each variable and store in the list
+for (col in new_columns_to_get_unique_values) {
+  new_unique_values_list[[col]] <- unique(final_df_replicated[[col]])
+}
+
+# Loop over unique regions and create new columns
+for (Region in new_unique_values_list$Region) {
+  final_df_replicated[[Region]] <- as.integer(final_df_replicated$Region == Region)
+}
+
+# Loop over unique regions and create new columns
+for (Brand in new_unique_values_list$Brand) {
+  final_df_replicated[[Brand]] <- as.integer(final_df_replicated$Brand == Brand)
+}
+
+# Loop over unique regions and create new columns
+for (Item in new_unique_values_list$Item) {
+  final_df_replicated[[Item]] <- as.integer(final_df_replicated$Item == Item)
+}
+
+# Loop over unique regions and create new columns
+for (Package in new_unique_values_list$Package) {
+  final_df_replicated[[Package]] <- as.integer(final_df_replicated$Package == Package)
+}
+
+#Create dummy_data and remove non one hot encoded data
+dummy_data <- final_df_replicated %>%
+  select(-Region, -Brand, -Item, -Package)
+
+#add a Unit sales column
+dummy_data$UNIT_SALES <- NA
+dummy_data$UNIT_SALES <- as.numeric(dummy_data$UNIT_SALES)
+```
+
+
+
+```{r}
+
+#rename columes to match original features
+dummy_data <- dummy_data %>%
+  rename(
+    `BUBBLE.JOY` = `BUBBLE JOY`,                                                                 `EXCLAMATION.SODA` = `EXCLAMATION SODA`,        
+    `CUPADA.ARID` = `CUPADA ARID`,
+    `BUBBLE.JOY.SPARKLING.WATER.MULBERRIES...` = `BUBBLE JOY SPARKLING WATER MULBERRIES   `,
+    `EXCLAMATION.REFRESHER.SPARKLING.WATER.MULBERRIES.PLUS.SUPER.JUICE.` = `EXCLAMATION REFRESHER SPARKLING WATER MULBERRIES PLUS SUPER-JUICE `,
+    `CROWN.CURATE.SPARKLING.WATER.MULBERRIES.CUCUMBER.` = `CROWN CURATE SPARKLING WATER MULBERRIES CUCUMBER `,
+    `BUBBLE.JOY.SPARKLING.WATER.MULBERRIES.` = `BUBBLE JOY SPARKLING WATER MULBERRIES `,
+    `DIGRESS.WATER.BEVERAGE.MULBERRIES.SUPER.JUICE.` = `DIGRESS WATER BEVERAGE SUPER-JUICE MULBERRIES `,
+    `DIGRESS.WATER.BEVERAGE.SUPER.JUICE.MULBERRIES.LOW.CALORIE.` = `DIGRESS WATER BEVERAGE SUPER-JUICE MULBERRIES LOW CALORIE `,
+    `GREETINGLE.BUBBLES.HEALTH.BEVERAGE.BOGOTA.MULBERRIES.DURIAN.NO.ARTIFICIAL.SWEETENERS.` = `GREETINGLE BUBBLES HEALTH BEVERAGE BOGOTA MULBERRIES DURIAN NO ARTIFICIAL SWEETENERS `,
+    `X16SMALL.MULTI.CUP` = `16SMALL MULTI CUP`,
+    `X12SMALL.8ONE.CUP` = `12SMALL 8ONE CUP`,
+    `ALL.OTHER.ONES` = `ALL OTHER ONES`,
+    `X24...25SMALL.MULTI.JUG` = `24 - 25SMALL MULTI JUG`,
+    `Week_Of_Year` = `Week_of_Year`,
+    `GREETINGLE.BUBBLES` = `GREETINGLE BUBBLES`,
+    `DIGRESS.IMMUNE.SUPPORT` = `DIGRESS IMMUNE SUPPORT`,
+  )
+
+# Check for Matching Features
+#Get the column names of Test and dummy_data
+names_Test <- names(Test)
+names_dummy_data <- names(dummy_data)
+
+# Find the matching column names
+matching_names <- intersect(names_Test, names_dummy_data)
+
+# Find the non-matching column names
+non_matching_names_Test <- setdiff(names_Test, matching_names)
+non_matching_names_dummy_data <- setdiff(names_dummy_data, matching_names)
+
+#Print the matching and non-matching column names
+cat("Matching column names:", paste(matching_names, collapse = ", "), "\n")
+cat("Non-matching column names in Test:", paste(non_matching_names_Test, collapse = ", "), "\n")
+cat("Non-matching column names in dummy_data:", paste(non_matching_names_dummy_data, collapse = ", "), "\n")
+
+
+# Adding the non-matching columns to dummy_data with default values
+for (col in non_matching_names_Test) {
+  dummy_data[[col]] <- NA  # You can change NA to any default value you prefer
+}
+
+
+# Get the column names of the Test dataframe
+test_colnames <- colnames(Test)
+
+# Reorder columns of dummy_data to match the order of columns in Test
+dummy_data <- dummy_data %>%
+  select(all_of(test_colnames))
+
+# Prepare features for XGBoost
+dummy_features <- dummy_data[, -which(names(dummy_data) == "UNIT_SALES")]
+
+# Convert data to DMatrix format
+dummy_dmatrix<- xgb.DMatrix(data = as.matrix(dummy_features))
+
+dummy_pred <- predict(model_xgb, dummy_dmatrix)
+
+# Add the predictions to dummy_data
+dummy_data$Predictions <- dummy_pred
+
+# Convert predictions to integers
+dummy_data$Predictions <- round(dummy_pred)
+
+# Convert to integer data type
+dummy_data$Predictions <- as.integer(dummy_data$Predictions)
+
+summary(dummy_data$Predictions)
+
+ggplot(dummy_data, aes(x = Predictions)) +
+  geom_density(fill = "blue", alpha = 0.5) +
+  labs(title = "Density Plot of Predicted Values",
+       x = "Predicted Values",
+       y = "Density")
+
+```
+
+
+```{r}
+
+mulberries_small %>%
+  summarize(n = n(),
+            AVG_UNIT_SALES = mean(UNIT_SALES))
+
+```
+
+
+```{r}
+
+# Mulberries Flavor Results
+summary(mulberries_small$UNIT_SALES)
+
+# Prediction Results
+summary(dummy_data$Predictions)
+
+```
+
+
+```{r}
+sorted_unit_sales <- mulberries_small$UNIT_SALES[order(mulberries_small$UNIT_SALES, decreasing = TRUE)]
+
+filtered_sales <- sorted_unit_sales[sorted_unit_sales > 36.22]
+
+length(filtered_sales)
+
+
+```
+
+
+## Business Case For Product 4
+
+The business case for doing an innovation product for this item is centered around a few key points. First, the Northern Region is the third most impactful predictor in our prediction model. Therefore, this indicates that the mulberries flavor is more popular in the Northern Region than others and that it makes sense to use that flavor in that region. Second, the most impactful predictor is a sparkling water product that contains mulberries. This shows the success of Sparkling Water when using the mulberries flavor.
+
+The median Unit Sales from our prediction model is slightly higher than the actual results for mulberries flavor, as the first quartile is also higher, indicating that rolling out this product would be safe because it has a high floor according to our prediction model. Out of the 15492 observations of the flavor mulberries, our predictions predict this to be 6065 out of 15492, or slightly better than half the observations
+
+
+
+## Business Case Against Product 4
+
+There are a few potential reasons why we would not want to roll out this innovation product. First, while the median values of the prediction set vs the actual set are nearly the same, the Mean values are much higher in the actual data than in our prediction data. That means that while the floor of rolling out this innovation product is high, the cieling is also much lower than the products currently available for this flavor. The 3rd quartile and max are also much higher for the actual results
+
+Second, when looking at the Northern Region against other regions for overall product success, the Norther Region is one of the lower performing regions. If we want to have the most success possible with a limited time product, it would probably have the best chance of succeeding in another region.
+
+According to our prediction model, this innovation product would land right near the middle of all of our observations for mulberries. Is it really worth it to invest the costs required for innovation products just to release something with average performance?
+
+```{r}
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
